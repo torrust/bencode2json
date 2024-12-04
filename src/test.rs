@@ -8,11 +8,11 @@
 #[cfg(test)]
 #[must_use]
 pub(crate) fn bencode_to_json_unchecked(input_buffer: &[u8]) -> String {
-    use crate::parsers::BencodeParser;
+    use crate::generators::json::Generator;
 
     let mut output = String::new();
 
-    let mut parser = BencodeParser::new(input_buffer);
+    let mut parser = Generator::new(input_buffer);
 
     parser
         .write_str(&mut output)

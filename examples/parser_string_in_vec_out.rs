@@ -5,13 +5,13 @@
 //! ```
 //!
 //! It prints "spam".
-use bencode2json::parsers::BencodeParser;
+use bencode2json::generators::json::Generator;
 
 fn main() {
     let input = "4:spam".to_string();
     let mut output = Vec::new();
 
-    if let Err(e) = BencodeParser::new(input.as_bytes()).write_bytes(&mut output) {
+    if let Err(e) = Generator::new(input.as_bytes()).write_bytes(&mut output) {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }

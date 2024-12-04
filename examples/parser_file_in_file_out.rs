@@ -10,7 +10,7 @@ use std::{
     io::{Read, Write},
 };
 
-use bencode2json::parsers::BencodeParser;
+use bencode2json::generators::json::Generator;
 use clap::{Arg, Command};
 
 fn main() {
@@ -61,7 +61,7 @@ fn main() {
         std::process::exit(1);
     };
 
-    if let Err(e) = BencodeParser::new(input).write_bytes(&mut output) {
+    if let Err(e) = Generator::new(input).write_bytes(&mut output) {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }

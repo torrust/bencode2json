@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::rw;
 
-use super::BencodeType;
+use super::generators::BencodeType;
 
 /// Errors that can occur while parsing a bencoded value.
 #[derive(Debug, Error)]
@@ -27,16 +27,16 @@ pub enum Error {
     /// The main parser peeks one byte ahead to know what kind of bencoded value
     /// is being parsed. If the byte read after peeking does not match the
     /// peeked byte, it means the input is being consumed somewhere else.
-    #[error("Read byte after peeking does match peeked byte; {0}; {1}")]
-    ReadByteAfterPeekingDoesMatchPeekedByte(ReadContext, WriteContext),
+    #[error("Read byte after peeking does match peeked byte; {0}")]
+    ReadByteAfterPeekingDoesMatchPeekedByte(ReadContext),
 
     /// Unrecognized first byte for new bencoded value.
     ///
     /// The main parser peeks one byte ahead to know what kind of bencoded value
     /// is being parsed. This error is raised when the peeked byte is not a
     /// valid first byte for a bencoded value.
-    #[error("Unrecognized first byte for new bencoded value; {0}; {1}")]
-    UnrecognizedFirstBencodeValueByte(ReadContext, WriteContext),
+    #[error("Unrecognized first byte for new bencoded value; {0}")]
+    UnrecognizedFirstBencodeValueByte(ReadContext),
 
     // Integers
     /// Unexpected byte parsing integer.
@@ -44,38 +44,38 @@ pub enum Error {
     /// The main parser parses integers by reading bytes until it finds the
     /// end of the integer. This error is raised when the byte read is not a
     /// valid byte for an integer bencoded value.
-    #[error("Unexpected byte parsing integer; {0}; {1}")]
-    UnexpectedByteParsingInteger(ReadContext, WriteContext),
+    #[error("Unexpected byte parsing integer; {0}")]
+    UnexpectedByteParsingInteger(ReadContext),
 
     /// Unexpected end of input parsing integer.
     ///
     /// The input ends before the integer ends.
-    #[error("Unexpected end of input parsing integer; {0}; {1}")]
-    UnexpectedEndOfInputParsingInteger(ReadContext, WriteContext),
+    #[error("Unexpected end of input parsing integer; {0}")]
+    UnexpectedEndOfInputParsingInteger(ReadContext),
 
     /// Leading zeros in integers are not allowed, for example b'i00e'.
-    #[error("Leading zeros in integers are not allowed, for example b'i00e'; {0}; {1}")]
-    LeadingZerosInIntegersNotAllowed(ReadContext, WriteContext),
+    #[error("Leading zeros in integers are not allowed, for example b'i00e'; {0}")]
+    LeadingZerosInIntegersNotAllowed(ReadContext),
 
     // Strings
     /// Invalid string length byte, expected a digit.
     ///
     /// The string parser found an invalid byte for the string length. The
     /// length can only be made of digits (0-9).
-    #[error("Invalid string length byte, expected a digit; {0}; {1}")]
-    InvalidStringLengthByte(ReadContext, WriteContext),
+    #[error("Invalid string length byte, expected a digit; {0}")]
+    InvalidStringLengthByte(ReadContext),
 
     /// Unexpected end of input parsing string length.
     ///
     /// The input ends before the string length ends.
-    #[error("Unexpected end of input parsing string length; {0}; {1}")]
-    UnexpectedEndOfInputParsingStringLength(ReadContext, WriteContext),
+    #[error("Unexpected end of input parsing string length; {0}")]
+    UnexpectedEndOfInputParsingStringLength(ReadContext),
 
     /// Unexpected end of input parsing string value.
     ///
     /// The input ends before the string value ends.
-    #[error("Unexpected end of input parsing string value; {0}; {1}")]
-    UnexpectedEndOfInputParsingStringValue(ReadContext, WriteContext),
+    #[error("Unexpected end of input parsing string value; {0}")]
+    UnexpectedEndOfInputParsingStringValue(ReadContext),
 
     // Lists
     /// Unexpected end of input parsing list. Expecting first list item or list end.
@@ -121,7 +121,7 @@ pub enum Error {
     NoMatchingStartForListOrDictEnd(ReadContext, WriteContext),
 }
 
-/// The reader context when the error ocurred.
+/// The reader context when the error occurred.
 #[derive(Debug)]
 pub struct ReadContext {
     /// The read byte that caused the error if any.
@@ -157,7 +157,7 @@ impl fmt::Display for ReadContext {
     }
 }
 
-/// The writer context when the error ocurred.
+/// The writer context when the error occurred.
 #[derive(Debug)]
 pub struct WriteContext {
     /// The written byte that caused the error if any.
@@ -197,7 +197,7 @@ impl fmt::Display for WriteContext {
 mod tests {
 
     mod for_read_context {
-        use crate::parsers::error::ReadContext;
+        use crate::error::ReadContext;
 
         #[test]
         fn it_should_display_the_read_context() {
@@ -237,7 +237,7 @@ mod tests {
     }
 
     mod for_write_context {
-        use crate::parsers::error::WriteContext;
+        use crate::error::WriteContext;
 
         #[test]
         fn it_should_display_the_read_context() {

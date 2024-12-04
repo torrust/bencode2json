@@ -13,7 +13,7 @@
 //! ```text
 //! cargo run -- -i ./tests/fixtures/sample.bencode -o output.json
 //! ```
-use bencode2json::parsers::BencodeParser;
+use bencode2json::generators::json::Generator;
 use clap::{Arg, Command};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -70,7 +70,7 @@ fn run() {
         Box::new(io::stdout())
     };
 
-    if let Err(e) = BencodeParser::new(input).write_bytes(&mut output) {
+    if let Err(e) = Generator::new(input).write_bytes(&mut output) {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }

@@ -34,10 +34,13 @@
 //!
 //! > __NOTICE__: In the context of this lib, parser is a function that takes an input
 //! > containing bencoded data and produces a JSON output (raw bytes or UTF-8 string).
-use parsers::{error::Error, BencodeParser};
-
-pub mod parsers;
+pub mod error;
+pub mod generators;
 pub mod rw;
+pub mod tokenizer;
+
+use error::Error;
+use generators::json::Generator;
 mod test;
 
 /// It converts bencoded bytes into a JSON string.
@@ -48,7 +51,7 @@ mod test;
 pub fn try_bencode_to_json(input_buffer: &[u8]) -> Result<String, Error> {
     let mut output = String::new();
 
-    let mut parser = BencodeParser::new(input_buffer);
+    let mut parser = Generator::new(input_buffer);
 
     match parser.write_str(&mut output) {
         Ok(()) => Ok(output),

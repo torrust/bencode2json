@@ -3,7 +3,7 @@
 //! It reads bencoded bytes from the input and writes JSON bytes to the output.
 use std::io::{self, Read};
 
-use crate::rw::{byte_reader::ByteReader, writer::Writer};
+use crate::rw::byte_reader::ByteReader;
 
 /* todo: Optimize UTF-8 conversion. Try to convert to string partially and stop
     converting if we reach a point when input is not valid UTF-8 anymore. This
@@ -13,21 +13,20 @@ use crate::rw::{byte_reader::ByteReader, writer::Writer};
 
 use core::str;
 
-use super::error::{Error, ReadContext, WriteContext};
+use super::error::{Error, ReadContext};
 
 /// It parses a string bencoded value.
 ///
 /// # Errors
 ///
-/// Will return an error if it can't read from the input or write to the
-/// output.
+/// Will return an error if it can't read from the input.
 ///
 /// # Panics
 ///
 /// Will panic if we reach the end of the input without completing the string.
-pub fn parse<R: Read, W: Writer>(reader: &mut ByteReader<R>, writer: &mut W) -> Result<(), Error> {
+pub fn parse<R: Read>(reader: &mut ByteReader<R>) -> Result<Vec<u8>, Error> {
     let mut string_parser = StringParser::default();
-    string_parser.parse(reader, writer)
+    string_parser.parse(reader)
 }
 
 /// Strings bencode format have two parts: `length:value`.
@@ -42,38 +41,18 @@ struct StringParser {
 }
 
 impl StringParser {
-    fn parse<R: Read, W: Writer>(
-        &mut self,
-        reader: &mut ByteReader<R>,
-        writer: &mut W,
-    ) -> Result<(), Error> {
+    fn parse<R: Read>(&mut self, reader: &mut ByteReader<R>) -> Result<Vec<u8>, Error> {
         let mut length = Length::default();
 
-        length.parse(reader, writer)?;
+        length.parse(reader)?;
 
         let mut value = Value::new(length.number);
 
-        value.parse(reader, writer)?;
+        let value_bytes = value.parse(reader)?;
 
         self.parsed_value = value.utf8();
 
-        writer.write_str(&self.json())?;
-
-        Ok(())
-    }
-
-    /// It returns the final parsed value as string.
-    ///
-    /// If the string contains non UTF-8 bytes it returns the hexadecimal list
-    /// of bytes in in the format '<hex>fa fb</hex>'  
-    fn parsed_value(&self) -> String {
-        self.parsed_value.clone()
-    }
-
-    /// It serializes the parsed value into JSON.
-    #[must_use]
-    fn json(&self) -> String {
-        serde_json::to_string(&self.parsed_value()).unwrap()
+        Ok(value_bytes)
     }
 }
 
@@ -89,20 +68,16 @@ struct Length {
 impl Length {
     const END_OF_STRING_LENGTH_BYTE: u8 = b':';
 
-    fn parse<R: Read, W: Writer>(
-        &mut self,
-        reader: &mut ByteReader<R>,
-        writer: &W,
-    ) -> Result<(), Error> {
+    fn parse<R: Read>(&mut self, reader: &mut ByteReader<R>) -> Result<(), Error> {
         loop {
-            let byte = Self::next_byte(reader, writer)?;
+            let byte = Self::next_byte(reader)?;
 
             match byte {
                 Self::END_OF_STRING_LENGTH_BYTE => {
                     break;
                 }
                 _ => {
-                    self.add_byte(byte, reader, writer)?;
+                    self.add_byte(byte, reader)?;
                 }
             }
         }
@@ -115,7 +90,7 @@ impl Length {
     /// # Errors
     ///
     /// Will return an error if the end of input was reached.
-    fn next_byte<R: Read, W: Writer>(reader: &mut ByteReader<R>, writer: &W) -> Result<u8, Error> {
+    fn next_byte<R: Read>(reader: &mut ByteReader<R>) -> Result<u8, Error> {
         match reader.read_byte() {
             Ok(byte) => Ok(byte),
             Err(err) => {
@@ -125,11 +100,6 @@ impl Length {
                             byte: None,
                             pos: reader.input_byte_counter(),
                             latest_bytes: reader.captured_bytes(),
-                        },
-                        WriteContext {
-                            byte: None,
-                            pos: writer.output_byte_counter(),
-                            latest_bytes: writer.captured_bytes(),
                         },
                     ));
                 }
@@ -143,25 +113,13 @@ impl Length {
     /// # Errors
     ///
     /// Will return an error if the byte is not a digit (0..9).
-    fn add_byte<R: Read, W: Writer>(
-        &mut self,
-        byte: u8,
-        reader: &mut ByteReader<R>,
-        writer: &W,
-    ) -> Result<(), Error> {
+    fn add_byte<R: Read>(&mut self, byte: u8, reader: &mut ByteReader<R>) -> Result<(), Error> {
         if !byte.is_ascii_digit() {
-            return Err(Error::InvalidStringLengthByte(
-                ReadContext {
-                    byte: Some(byte),
-                    pos: reader.input_byte_counter(),
-                    latest_bytes: reader.captured_bytes(),
-                },
-                WriteContext {
-                    byte: Some(byte),
-                    pos: writer.output_byte_counter(),
-                    latest_bytes: writer.captured_bytes(),
-                },
-            ));
+            return Err(Error::InvalidStringLengthByte(ReadContext {
+                byte: Some(byte),
+                pos: reader.input_byte_counter(),
+                latest_bytes: reader.captured_bytes(),
+            }));
         }
 
         self.bytes.push(byte);
@@ -198,16 +156,12 @@ impl Value {
         }
     }
 
-    fn parse<R: Read, W: Writer>(
-        &mut self,
-        reader: &mut ByteReader<R>,
-        writer: &W,
-    ) -> Result<(), Error> {
+    fn parse<R: Read>(&mut self, reader: &mut ByteReader<R>) -> Result<Vec<u8>, Error> {
         for _i in 1..=self.length {
-            self.add_byte(Self::next_byte(reader, writer)?);
+            self.add_byte(Self::next_byte(reader)?);
         }
 
-        Ok(())
+        Ok(self.bytes.clone())
     }
 
     /// It reads the next byte from the input.
@@ -215,23 +169,16 @@ impl Value {
     /// # Errors
     ///
     /// Will return an error if the end of input was reached.
-    fn next_byte<R: Read, W: Writer>(reader: &mut ByteReader<R>, writer: &W) -> Result<u8, Error> {
+    fn next_byte<R: Read>(reader: &mut ByteReader<R>) -> Result<u8, Error> {
         match reader.read_byte() {
             Ok(byte) => Ok(byte),
             Err(err) => {
                 if err.kind() == io::ErrorKind::UnexpectedEof {
-                    return Err(Error::UnexpectedEndOfInputParsingStringValue(
-                        ReadContext {
-                            byte: None,
-                            pos: reader.input_byte_counter(),
-                            latest_bytes: reader.captured_bytes(),
-                        },
-                        WriteContext {
-                            byte: None,
-                            pos: writer.output_byte_counter(),
-                            latest_bytes: writer.captured_bytes(),
-                        },
-                    ));
+                    return Err(Error::UnexpectedEndOfInputParsingStringValue(ReadContext {
+                        byte: None,
+                        pos: reader.input_byte_counter(),
+                        latest_bytes: reader.captured_bytes(),
+                    }));
                 }
                 Err(err.into())
             }
@@ -263,47 +210,29 @@ impl Value {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        parsers::error::Error,
-        rw::{byte_reader::ByteReader, string_writer::StringWriter},
-    };
+    use crate::{error::Error, rw::byte_reader::ByteReader};
 
     use super::parse;
 
-    fn bencode_to_json_unchecked(input_buffer: &[u8]) -> String {
-        let mut output = String::new();
-
-        parse_bencode(input_buffer, &mut output).expect("Bencode to JSON conversion failed");
-
-        output
+    fn bencode_to_json_unchecked(input_buffer: &[u8]) -> Vec<u8> {
+        parse_bencode(input_buffer).expect("Bencode to JSON conversion failed")
     }
 
-    fn try_bencode_to_json(input_buffer: &[u8]) -> Result<String, Error> {
-        let mut output = String::new();
-
-        match parse_bencode(input_buffer, &mut output) {
-            Ok(()) => Ok(output),
-            Err(err) => Err(err),
-        }
+    fn try_bencode_to_json(input_buffer: &[u8]) -> Result<Vec<u8>, Error> {
+        parse_bencode(input_buffer)
     }
 
-    fn parse_bencode(input_buffer: &[u8], output: &mut String) -> Result<(), Error> {
+    fn parse_bencode(input_buffer: &[u8]) -> Result<Vec<u8>, Error> {
         let mut reader = ByteReader::new(input_buffer);
-
-        let mut writer = StringWriter::new(output);
-
-        parse(&mut reader, &mut writer)
+        parse(&mut reader)
     }
 
     mod for_helpers {
-        use crate::parsers::string::tests::try_bencode_to_json;
+        use crate::tokenizer::string::tests::try_bencode_to_json;
 
         #[test]
         fn bencode_to_json_wrapper_succeeds() {
-            assert_eq!(
-                try_bencode_to_json(b"4:spam").unwrap(),
-                r#""<string>spam</string>""#.to_string()
-            );
+            assert_eq!(try_bencode_to_json(b"4:spam").unwrap(), r"spam".as_bytes());
         }
 
         #[test]
@@ -314,118 +243,61 @@ mod tests {
 
     #[test]
     fn length_can_contain_leading_zeros() {
-        assert_eq!(
-            bencode_to_json_unchecked(b"00:"),
-            r#""<string></string>""#.to_string()
-        );
+        assert_eq!(bencode_to_json_unchecked(b"00:"), r"".as_bytes());
     }
 
     #[test]
     fn empty_string() {
-        assert_eq!(
-            bencode_to_json_unchecked(b"0:"),
-            r#""<string></string>""#.to_string()
-        );
+        assert_eq!(bencode_to_json_unchecked(b"0:"), r"".as_bytes());
     }
 
     #[test]
     fn string_with_tags() {
         assert_eq!(
             bencode_to_json_unchecked(b"8:<string>"),
-            r#""<string><string></string>""#.to_string()
+            r"<string>".as_bytes()
         );
     }
 
     #[test]
     fn utf8() {
-        assert_eq!(
-            bencode_to_json_unchecked(b"4:spam"),
-            r#""<string>spam</string>""#.to_string()
-        );
+        assert_eq!(bencode_to_json_unchecked(b"4:spam"), r"spam".as_bytes());
     }
 
     #[test]
     fn non_utf8() {
         assert_eq!(
             bencode_to_json_unchecked(b"4:\xFF\xFE\xFD\xFC"),
-            r#""<hex>fffefdfc</hex>""#.to_string()
+            vec![0xFF, 0xFE, 0xFD, 0xFC]
         );
     }
 
     #[test]
     fn ending_with_bencode_end_char() {
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:e"),
-            r#""<string>e</string>""#.to_string()
-        );
+        assert_eq!(bencode_to_json_unchecked(b"1:e"), r"e".as_bytes());
     }
 
     #[test]
     fn containing_a_reserved_char() {
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:i"),
-            r#""<string>i</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:l"),
-            r#""<string>l</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:d"),
-            r#""<string>d</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:l"),
-            r#""<string>l</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:e"),
-            r#""<string>e</string>""#.to_string()
-        );
+        assert_eq!(bencode_to_json_unchecked(b"1:i"), r"i".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:l"), r"l".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:d"), r"d".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:l"), r"l".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:e"), r"e".as_bytes());
     }
 
     #[test]
     fn containing_a_digit() {
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:0"),
-            r#""<string>0</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:1"),
-            r#""<string>1</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:2"),
-            r#""<string>2</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:3"),
-            r#""<string>3</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:4"),
-            r#""<string>4</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:5"),
-            r#""<string>5</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:6"),
-            r#""<string>6</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:7"),
-            r#""<string>7</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:8"),
-            r#""<string>8</string>""#.to_string()
-        );
-        assert_eq!(
-            bencode_to_json_unchecked(b"1:9"),
-            r#""<string>9</string>""#.to_string()
-        );
+        assert_eq!(bencode_to_json_unchecked(b"1:0"), r"0".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:1"), r"1".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:2"), r"2".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:3"), r"3".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:4"), r"4".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:5"), r"5".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:6"), r"6".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:7"), r"7".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:8"), r"8".as_bytes());
+        assert_eq!(bencode_to_json_unchecked(b"1:9"), r"9".as_bytes());
     }
 
     mod should_escape_json {
@@ -484,11 +356,9 @@ mod tests {
         use std::io::{self, Read};
 
         use crate::{
-            parsers::{
-                error::Error,
-                string::{parse, tests::try_bencode_to_json},
-            },
-            rw::{byte_reader::ByteReader, string_writer::StringWriter},
+            error::Error,
+            rw::byte_reader::ByteReader,
+            tokenizer::string::{parse, tests::try_bencode_to_json},
         };
 
         #[test]
@@ -576,10 +446,7 @@ mod tests {
         fn it_cannot_read_more_bytes_without_finishing_parsing_the_string_length() {
             let mut reader = ByteReader::new(FaultyReader::new(b"4:spam".to_vec(), 1));
 
-            let mut output = String::new();
-            let mut writer = StringWriter::new(&mut output);
-
-            let result = parse(&mut reader, &mut writer);
+            let result = parse(&mut reader);
 
             assert!(matches!(result, Err(Error::Io(_))));
         }
@@ -588,10 +455,7 @@ mod tests {
         fn it_cannot_read_more_bytes_without_finishing_parsing_the_string_value() {
             let mut reader = ByteReader::new(FaultyReader::new(b"4:spam".to_vec(), 3));
 
-            let mut output = String::new();
-            let mut writer = StringWriter::new(&mut output);
-
-            let result = parse(&mut reader, &mut writer);
+            let result = parse(&mut reader);
 
             assert!(matches!(result, Err(Error::Io(_))));
         }

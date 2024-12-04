@@ -65,12 +65,12 @@ Error: Unexpected end of input parsing integer; read context: input pos 3, lates
 
 ```console
 printf "3:ab" | cargo run
-Error: Unexpected end of input parsing string value; read context: input pos 4, latest input bytes dump: [51, 58, 97, 98] (UTF-8 string: `3:ab`); write context: output pos 0, latest output bytes dump: [] (UTF-8 string: ``)
+Error: Unexpected end of input parsing string value; read context: input pos 4, latest input bytes dump: [51, 58, 97, 98] (UTF-8 string: `3:ab`)
 ```
 
 ```console
 echo "i00e" | cargo run
-Error: Leading zeros in integers are not allowed, for example b'i00e'; read context: byte `48` (char: `0`), input pos 3, latest input bytes dump: [105, 48, 48] (UTF-8 string: `i00`); write context: byte `48` (char: `0`), output pos 2, latest output bytes dump: [48, 48] (UTF-8 string: `00`)
+Error: Leading zeros in integers are not allowed, for example b'i00e'; read context: byte `48` (char: `0`), input pos 3, latest input bytes dump: [105, 48, 48] (UTF-8 string: `i00`)
 ```
 
 Generating pretty JSON with [jq][jq]:
@@ -111,36 +111,10 @@ cargo add bencode2json
 
 There two ways of using the library:
 
-- With high-level parser wrappers.
-- With the low-level parsers.
+- With high-level wrappers.
+- With the low-level generators.
 
-Example using the high-level parser wrappers:
-
-```rust
-use bencode2json::{try_bencode_to_json};
-
-let result = try_bencode_to_json(b"d4:spam4:eggse").unwrap();
-
-assert_eq!(result, r#"{"<string>spam</string>":"<string>eggs</<string>string>"}"#);
-```
-
-Example using the low-level parser:
-
-```rust
-use bencode2json::parsers::{BencodeParser};
-
-let mut output = String::new();
-
-let mut parser = BencodeParser::new(&b"4:spam"[..]);
-
-parser
-  .write_str(&mut output)
-  .expect("Bencode to JSON conversion failed");
-
-println!("{output}"); // It prints the JSON string: "<string>spam</string>"
-```
-
-More [examples](./examples/).
+See [examples](./examples/).
 
 ## Test
 
@@ -167,21 +141,19 @@ cargo cov
 ## Performance
 
 In terms of memory usage this implementation consumes at least the size of the
-biggest bencoded string. The string parser keeps all the string bytes in memory until
-it parses the whole string, in order to convert it to UTF-8, when it's possible.
+biggest bencoded integer or string. The string and integer parsers keeps all the bytes in memory until
+it parses the whole value.
 
 The library also wraps the input and output streams in a [BufReader](https://doc.rust-lang.org/std/io/struct.BufReader.html)
  and [BufWriter](https://doc.rust-lang.org/std/io/struct.BufWriter.html) because it can be excessively inefficient to work directly with something that implements [Read](https://doc.rust-lang.org/std/io/trait.Read.html) or [Write](https://doc.rust-lang.org/std/io/trait.Write.html).
 
 ## TODO
 
-- [ ] More examples of using the library.
 - [ ] Counter for number of items in a list for debugging and errors.
 - [ ] Fuzz testing: Generate random valid bencoded values.
 - [ ] Install tracing crate. Add verbose mode that enables debugging.
 - [ ] Option to check if the final JSON it's valid at the end of the process.
 - [ ] Benchmarking for this implementation and the original C implementation.
-- [ ] Optimize string parser. We can stop trying to convert the string to UTF-8 when we find a non valid UTF-8 char.
 
 ## Alternatives
 

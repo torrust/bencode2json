@@ -1,48 +1,29 @@
-//! Parsers, including the main parser and the parsers for the basic types
-//! (integer and string).
-//!
-//! ``BencodeParser`` is the main parser. It is generic over the type of the
-//! input buffer.
-pub mod error;
-pub mod integer;
-pub mod stack;
-pub mod string;
-
+//! Json generator for bencoded data.
+use core::str;
 use std::{
     fmt::Write as FmtWrite,
-    io::{self, Read, Write as IoWrite},
+    io::{Read, Write as IoWrite},
 };
 
-use derive_more::derive::Display;
-use error::{ReadContext, WriteContext};
-use stack::{Stack, State};
+use super::{
+    stack::{Stack, State},
+    BencodeType,
+};
+use tokenizer::{BencodeToken, Tokenizer};
 
-use crate::rw::{
-    byte_reader::ByteReader, byte_writer::ByteWriter, string_writer::StringWriter, writer::Writer,
+use crate::{
+    error::{self, ReadContext, WriteContext},
+    rw::{byte_writer::ByteWriter, string_writer::StringWriter, writer::Writer},
+    tokenizer,
 };
 
-// Bencoded reserved bytes
-const BENCODE_BEGIN_INTEGER: u8 = b'i';
-const BENCODE_END_INTEGER: u8 = b'e';
-const BENCODE_BEGIN_LIST: u8 = b'l';
-const BENCODE_BEGIN_DICT: u8 = b'd';
-const BENCODE_END_LIST_OR_DICT: u8 = b'e';
-
-#[derive(Debug, PartialEq, Display)]
-pub enum BencodeType {
-    Integer,
-    String,
-    List,
-    Dict,
-}
-
-pub struct BencodeParser<R: Read> {
-    byte_reader: ByteReader<R>,
+pub struct Generator<R: Read> {
+    tokenizer: Tokenizer<R>,
     num_processed_tokens: u64,
     stack: Stack,
 }
 
-impl<R: Read> BencodeParser<R> {
+impl<R: Read> Generator<R> {
     const JSON_ARRAY_BEGIN: u8 = b'[';
     const JSON_ARRAY_ITEMS_SEPARATOR: u8 = b',';
     const JSON_ARRAY_END: u8 = b']';
@@ -53,8 +34,8 @@ impl<R: Read> BencodeParser<R> {
     const JSON_OBJ_END: u8 = b'}';
 
     pub fn new(reader: R) -> Self {
-        BencodeParser {
-            byte_reader: ByteReader::new(reader),
+        Generator {
+            tokenizer: Tokenizer::new(reader),
             num_processed_tokens: 1,
             stack: Stack::default(),
         }
@@ -104,49 +85,49 @@ impl<R: Read> BencodeParser<R> {
     /// - It can't read from the input or write to the output.
     /// - The input is invalid Bencode.
     fn parse<W: Writer>(&mut self, writer: &mut W) -> Result<(), error::Error> {
-        while let Some(peeked_byte) = Self::peek_byte(&mut self.byte_reader, writer)? {
-            match peeked_byte {
-                BENCODE_BEGIN_INTEGER => {
+        while let Some(token) = self.tokenizer.next_token()? {
+            match token {
+                BencodeToken::Integer(integer_bytes) => {
                     self.begin_bencoded_value(BencodeType::Integer, writer)?;
-                    integer::parse(&mut self.byte_reader, writer)?;
+                    // todo: add `write_bytes` to writer.
+                    for bytes in integer_bytes {
+                        writer.write_byte(bytes)?;
+                    }
                 }
-                b'0'..=b'9' => {
+                BencodeToken::String(string_bytes) => {
                     self.begin_bencoded_value(BencodeType::String, writer)?;
-                    string::parse(&mut self.byte_reader, writer)?;
+
+                    let html_tag_style_string = match str::from_utf8(&string_bytes) {
+                        Ok(string) => {
+                            // String only contains valid UTF-8 chars -> print it as it's
+                            &format!("<string>{}</string>", string.to_owned())
+                        }
+                        Err(_) => {
+                            // String contains non valid UTF-8 chars -> print it as hex bytes
+                            &format!("<hex>{}</hex>", hex::encode(string_bytes))
+                        }
+                    };
+
+                    writer.write_str(
+                        &serde_json::to_string(&html_tag_style_string)
+                            .expect("Failed to serialize to JSON. This should not happen because non UTF-8 bencoded string are serialized as hex bytes"),
+                    )?;
                 }
-                BENCODE_BEGIN_LIST => {
-                    let _byte = Self::read_peeked_byte(peeked_byte, &mut self.byte_reader, writer)?;
+                BencodeToken::BeginList => {
                     self.begin_bencoded_value(BencodeType::List, writer)?;
                     writer.write_byte(Self::JSON_ARRAY_BEGIN)?;
                     self.stack.push(State::ExpectingFirstListItemOrEnd);
                 }
-                BENCODE_BEGIN_DICT => {
-                    let _byte = Self::read_peeked_byte(peeked_byte, &mut self.byte_reader, writer)?;
+                BencodeToken::BeginDict => {
                     self.begin_bencoded_value(BencodeType::Dict, writer)?;
                     writer.write_byte(Self::JSON_OBJ_BEGIN)?;
                     self.stack.push(State::ExpectingFirstDictFieldOrEnd);
                 }
-                BENCODE_END_LIST_OR_DICT => {
-                    let _byte = Self::read_peeked_byte(peeked_byte, &mut self.byte_reader, writer)?;
+                BencodeToken::EndListOrDict => {
                     self.end_list_or_dict(writer)?;
                 }
-                b'\n' => {
+                BencodeToken::LineBreak => {
                     // Ignore line breaks at the beginning, the end, or between values
-                    let _byte = Self::read_peeked_byte(peeked_byte, &mut self.byte_reader, writer)?;
-                }
-                _ => {
-                    return Err(error::Error::UnrecognizedFirstBencodeValueByte(
-                        ReadContext {
-                            byte: Some(peeked_byte),
-                            pos: self.byte_reader.input_byte_counter(),
-                            latest_bytes: self.byte_reader.captured_bytes(),
-                        },
-                        WriteContext {
-                            byte: Some(peeked_byte),
-                            pos: writer.output_byte_counter(),
-                            latest_bytes: writer.captured_bytes(),
-                        },
-                    ));
                 }
             }
 
@@ -154,68 +135,6 @@ impl<R: Read> BencodeParser<R> {
         }
 
         self.check_bad_end_stack_state(writer)
-    }
-
-    /// It reads the next byte from the input consuming it. It returns `None` if
-    /// the input has ended.
-    ///
-    /// # Errors
-    ///
-    /// Will return and errors if:
-    ///
-    /// - It can't read from the input.
-    /// - The byte read is not the expected one (the previously peeked byte).
-    fn read_peeked_byte<W: Writer>(
-        peeked_byte: u8,
-        reader: &mut ByteReader<R>,
-        writer: &W,
-    ) -> Result<Option<u8>, error::Error> {
-        match reader.read_byte() {
-            Ok(byte) => {
-                if byte == peeked_byte {
-                    return Ok(Some(byte));
-                }
-                Err(error::Error::ReadByteAfterPeekingDoesMatchPeekedByte(
-                    ReadContext {
-                        byte: Some(byte),
-                        pos: reader.input_byte_counter(),
-                        latest_bytes: reader.captured_bytes(),
-                    },
-                    WriteContext {
-                        byte: Some(byte),
-                        pos: writer.output_byte_counter(),
-                        latest_bytes: writer.captured_bytes(),
-                    },
-                ))
-            }
-            Err(err) => {
-                if err.kind() == io::ErrorKind::UnexpectedEof {
-                    return Ok(None);
-                }
-                Err(err.into())
-            }
-        }
-    }
-
-    /// It peeks the next byte from the input without consuming it. It returns
-    /// `None` if the input has ended.
-    ///
-    /// # Errors
-    ///
-    /// Will return and errors if it can't read from the input.
-    fn peek_byte<W: Writer>(
-        reader: &mut ByteReader<R>,
-        _writer: &W,
-    ) -> Result<Option<u8>, error::Error> {
-        match reader.peek_byte() {
-            Ok(byte) => Ok(Some(byte)),
-            Err(err) => {
-                if err.kind() == io::ErrorKind::UnexpectedEof {
-                    return Ok(None);
-                }
-                Err(err.into())
-            }
-        }
     }
 
     /// It updates the stack state and prints the delimiters when needed.
@@ -245,8 +164,8 @@ impl<R: Read> BencodeParser<R> {
                         bencode_type,
                         ReadContext {
                             byte: None,
-                            pos: self.byte_reader.input_byte_counter(),
-                            latest_bytes: self.byte_reader.captured_bytes(),
+                            pos: self.tokenizer.input_byte_counter(),
+                            latest_bytes: self.tokenizer.captured_bytes(),
                         },
                         WriteContext {
                             byte: None,
@@ -269,8 +188,8 @@ impl<R: Read> BencodeParser<R> {
                         bencode_type,
                         ReadContext {
                             byte: None,
-                            pos: self.byte_reader.input_byte_counter(),
-                            latest_bytes: self.byte_reader.captured_bytes(),
+                            pos: self.tokenizer.input_byte_counter(),
+                            latest_bytes: self.tokenizer.captured_bytes(),
                         },
                         WriteContext {
                             byte: None,
@@ -311,8 +230,8 @@ impl<R: Read> BencodeParser<R> {
                 return Err(error::Error::PrematureEndOfDict(
                     ReadContext {
                         byte: None,
-                        pos: self.byte_reader.input_byte_counter(),
-                        latest_bytes: self.byte_reader.captured_bytes(),
+                        pos: self.tokenizer.input_byte_counter(),
+                        latest_bytes: self.tokenizer.captured_bytes(),
                     },
                     WriteContext {
                         byte: None,
@@ -325,8 +244,8 @@ impl<R: Read> BencodeParser<R> {
                 return Err(error::Error::NoMatchingStartForListOrDictEnd(
                     ReadContext {
                         byte: None,
-                        pos: self.byte_reader.input_byte_counter(),
-                        latest_bytes: self.byte_reader.captured_bytes(),
+                        pos: self.tokenizer.input_byte_counter(),
+                        latest_bytes: self.tokenizer.captured_bytes(),
                     },
                     WriteContext {
                         byte: None,
@@ -354,8 +273,8 @@ impl<R: Read> BencodeParser<R> {
                 error::Error::UnexpectedEndOfInputExpectingFirstListItemOrEnd(
                     ReadContext {
                         byte: None,
-                        pos: self.byte_reader.input_byte_counter(),
-                        latest_bytes: self.byte_reader.captured_bytes(),
+                        pos: self.tokenizer.input_byte_counter(),
+                        latest_bytes: self.tokenizer.captured_bytes(),
                     },
                     WriteContext {
                         byte: None,
@@ -368,8 +287,8 @@ impl<R: Read> BencodeParser<R> {
                 Err(error::Error::UnexpectedEndOfInputExpectingNextListItem(
                     ReadContext {
                         byte: None,
-                        pos: self.byte_reader.input_byte_counter(),
-                        latest_bytes: self.byte_reader.captured_bytes(),
+                        pos: self.tokenizer.input_byte_counter(),
+                        latest_bytes: self.tokenizer.captured_bytes(),
                     },
                     WriteContext {
                         byte: None,
@@ -382,8 +301,8 @@ impl<R: Read> BencodeParser<R> {
                 error::Error::UnexpectedEndOfInputExpectingFirstDictFieldOrEnd(
                     ReadContext {
                         byte: None,
-                        pos: self.byte_reader.input_byte_counter(),
-                        latest_bytes: self.byte_reader.captured_bytes(),
+                        pos: self.tokenizer.input_byte_counter(),
+                        latest_bytes: self.tokenizer.captured_bytes(),
                     },
                     WriteContext {
                         byte: None,
@@ -396,8 +315,8 @@ impl<R: Read> BencodeParser<R> {
                 Err(error::Error::UnexpectedEndOfInputExpectingDictFieldValue(
                     ReadContext {
                         byte: None,
-                        pos: self.byte_reader.input_byte_counter(),
-                        latest_bytes: self.byte_reader.captured_bytes(),
+                        pos: self.tokenizer.input_byte_counter(),
+                        latest_bytes: self.tokenizer.captured_bytes(),
                     },
                     WriteContext {
                         byte: None,
@@ -410,8 +329,8 @@ impl<R: Read> BencodeParser<R> {
                 error::Error::UnexpectedEndOfInputExpectingDictFieldKeyOrEnd(
                     ReadContext {
                         byte: None,
-                        pos: self.byte_reader.input_byte_counter(),
-                        latest_bytes: self.byte_reader.captured_bytes(),
+                        pos: self.tokenizer.input_byte_counter(),
+                        latest_bytes: self.tokenizer.captured_bytes(),
                     },
                     WriteContext {
                         byte: None,
@@ -429,16 +348,16 @@ mod tests {
 
     use std::io::{self, Read};
 
-    use crate::{parsers::BencodeParser, test::bencode_to_json_unchecked, try_bencode_to_json};
+    use crate::generators::json::Generator;
 
     mod it_should_allow_writing {
-        use crate::parsers::BencodeParser;
+        use crate::generators::json::Generator;
 
         #[test]
         fn to_any_type_implementing_io_write_trait() {
             let mut output = Vec::new();
 
-            let mut parser = BencodeParser::new(&b"i0e"[..]);
+            let mut parser = Generator::new(&b"i0e"[..]);
 
             parser
                 .write_bytes(&mut output)
@@ -451,7 +370,7 @@ mod tests {
         fn writing_to_any_type_implementing_fmt_write_trait() {
             let mut output = String::new();
 
-            let mut parser = BencodeParser::new(&b"i0e"[..]);
+            let mut parser = Generator::new(&b"i0e"[..]);
 
             parser
                 .write_str(&mut output)
@@ -476,7 +395,7 @@ mod tests {
 
         let mut output = String::new();
 
-        let mut parser = BencodeParser::new(EmptyReader);
+        let mut parser = Generator::new(EmptyReader);
 
         parser.write_str(&mut output).unwrap();
 
@@ -485,13 +404,13 @@ mod tests {
 
     mod it_should_allow_special_bencode_cases {
 
-        use crate::{parsers::BencodeParser, test::bencode_to_json_unchecked};
+        use crate::{generators::json::Generator, test::bencode_to_json_unchecked};
 
         #[test]
         fn an_empty_input() {
             let mut output = String::new();
 
-            let mut parser = BencodeParser::new(&b""[..]);
+            let mut parser = Generator::new(&b""[..]);
 
             parser
                 .write_str(&mut output)
@@ -522,10 +441,7 @@ mod tests {
     mod it_should_fail {
         use std::io::{self, Read};
 
-        use crate::{
-            parsers::{error::Error, BencodeParser},
-            try_bencode_to_json,
-        };
+        use crate::{error::Error, generators::json::Generator, try_bencode_to_json};
 
         #[test]
         fn when_there_is_a_problem_reading_from_input() {
@@ -542,7 +458,7 @@ mod tests {
 
             let mut output = String::new();
 
-            let mut parser = BencodeParser::new(FaultyReader);
+            let mut parser = Generator::new(FaultyReader);
 
             let result = parser.write_str(&mut output);
 
@@ -622,7 +538,7 @@ mod tests {
         }
 
         mod should_fail {
-            use crate::{parsers::error::Error, try_bencode_to_json};
+            use crate::{error::Error, try_bencode_to_json};
 
             #[test]
             fn when_it_finds_an_invalid_byte() {
@@ -784,7 +700,7 @@ mod tests {
         }
 
         mod should_escape_json {
-            use crate::{parsers::tests::bencode_to_json_unchecked, to_bencode};
+            use crate::{test::bencode_to_json_unchecked, to_bencode};
 
             #[test]
             fn containing_a_double_quote() {
@@ -828,7 +744,7 @@ mod tests {
         }
 
         mod it_should_fail_parsing_when {
-            use crate::parsers::{error::Error, tests::try_bencode_to_json};
+            use crate::{error::Error, try_bencode_to_json};
 
             #[test]
             fn it_reaches_the_end_of_the_input_parsing_the_string_length() {
@@ -866,9 +782,9 @@ mod tests {
     }
 
     mod lists {
-        use crate::{
-            parsers::tests::bencode_to_json_unchecked,
-            test::{generate_n_nested_empty_bencoded_lists, generate_n_nested_empty_json_arrays},
+        use crate::test::{
+            bencode_to_json_unchecked, generate_n_nested_empty_bencoded_lists,
+            generate_n_nested_empty_json_arrays,
         };
 
         #[test]
@@ -895,7 +811,7 @@ mod tests {
         }
 
         mod with_one_item {
-            use crate::parsers::tests::bencode_to_json_unchecked;
+            use crate::test::bencode_to_json_unchecked;
 
             #[test]
             fn integer() {
@@ -919,7 +835,7 @@ mod tests {
             }
 
             mod of_type_list {
-                use crate::parsers::tests::bencode_to_json_unchecked;
+                use crate::test::bencode_to_json_unchecked;
 
                 #[test]
                 fn two_nested_empty_list() {
@@ -978,7 +894,7 @@ mod tests {
             }
 
             mod of_type_dict {
-                use crate::parsers::tests::bencode_to_json_unchecked;
+                use crate::test::bencode_to_json_unchecked;
 
                 #[test]
                 fn empty() {
@@ -1037,7 +953,7 @@ mod tests {
         }
 
         mod with_two_items_of_the_same_type {
-            use crate::parsers::tests::bencode_to_json_unchecked;
+            use crate::test::bencode_to_json_unchecked;
 
             #[test]
             fn two_integers() {
@@ -1091,7 +1007,7 @@ mod tests {
         }
 
         mod with_two_items_of_different_types {
-            use crate::parsers::tests::bencode_to_json_unchecked;
+            use crate::test::bencode_to_json_unchecked;
 
             #[test]
             fn integer_and_utf8_string() {
@@ -1401,7 +1317,7 @@ mod tests {
         }
 
         mod should_fail {
-            use crate::{parsers::error::Error, try_bencode_to_json};
+            use crate::{error::Error, try_bencode_to_json};
 
             #[test]
             fn when_an_empty_list_does_not_have_the_matching_close_byte() {
@@ -1442,11 +1358,9 @@ mod tests {
     }
 
     mod dictionary {
-        use crate::{
-            parsers::tests::bencode_to_json_unchecked,
-            test::{
-                generate_n_nested_empty_bencoded_dictionaries, generate_n_nested_empty_json_objects,
-            },
+        use crate::test::{
+            bencode_to_json_unchecked, generate_n_nested_empty_bencoded_dictionaries,
+            generate_n_nested_empty_json_objects,
         };
 
         #[test]
@@ -1479,7 +1393,7 @@ mod tests {
         }
 
         mod with_a_key {
-            use crate::parsers::tests::bencode_to_json_unchecked;
+            use crate::test::bencode_to_json_unchecked;
 
             #[test]
             fn starting_with_a_digit() {
@@ -1499,7 +1413,7 @@ mod tests {
         }
 
         mod with_one_field {
-            use crate::parsers::tests::bencode_to_json_unchecked;
+            use crate::test::bencode_to_json_unchecked;
 
             #[test]
             fn integer() {
@@ -1543,7 +1457,7 @@ mod tests {
         }
 
         mod with_two_fields_of_the_same_type {
-            use crate::parsers::tests::bencode_to_json_unchecked;
+            use crate::test::bencode_to_json_unchecked;
 
             #[test]
             fn two_integers() {
@@ -1934,11 +1848,12 @@ mod tests {
         mod should_escape_json {
 
             mod in_field_keys {
-                use crate::parsers::tests::bencode_to_json_unchecked;
 
                 // Only one especial char is tested. The string parser contains
                 // other tests for the rest of the special chars that need to be
                 // escaped.
+
+                use crate::test::bencode_to_json_unchecked;
 
                 #[test]
                 fn containing_a_line_break_at_the_beginning_of_the_string() {
@@ -1966,7 +1881,7 @@ mod tests {
             }
 
             mod in_field_values {
-                use crate::parsers::tests::bencode_to_json_unchecked;
+                use crate::test::bencode_to_json_unchecked;
 
                 #[test]
                 fn containing_a_line_break_at_the_beginning_of_the_string() {
@@ -1995,7 +1910,7 @@ mod tests {
         }
 
         mod should_fail {
-            use crate::{parsers::error::Error, try_bencode_to_json};
+            use crate::{error::Error, try_bencode_to_json};
 
             #[test]
             fn when_an_empty_dict_does_not_have_the_matching_close_byte() {
@@ -2073,8 +1988,8 @@ mod tests {
             }
 
             mod when_the_field_key_is_not_a_string_for_example {
-                use crate::parsers::error::Error;
-                use crate::parsers::BencodeType;
+                use crate::error::Error;
+                use crate::generators::json::BencodeType;
                 use crate::try_bencode_to_json;
 
                 #[test]
